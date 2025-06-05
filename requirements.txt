@@ -10,3 +10,4 @@ bs4==0.0.2
 BS4-for-aiogram==0.0.0.5
 p01.build==0.8.1
 web-parser==0.1.0
+lxml
