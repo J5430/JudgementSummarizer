@@ -2,11 +2,46 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 import subprocess
-import time
+import os
+import json
+import hashlib
 import urllib.parse
-import re
 
-# ========== OLLAMA SUMMARIZER ==========
+# ================= LOCAL CACHE PATH (Streamlit Cloud friendly) ===================
+CACHE_DIR = "./cache"
+
+def get_cache_path(query, title, court):
+    key = f"{query}|{title}|{court}"
+    filename = hashlib.sha256(key.encode()).hexdigest() + ".json"
+    return os.path.join(CACHE_DIR, filename)
+
+def load_cached_summary(query, title, court):
+    path = get_cache_path(query, title, court)
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error loading cache: {e}")
+            return None
+    return None
+
+def save_cached_summary(query, title, court, summary):
+    if not os.path.exists(CACHE_DIR):
+        os.makedirs(CACHE_DIR)
+    path = get_cache_path(query, title, court)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({
+                "query": query,
+                "title": title,
+                "court": court,
+                "summary": summary
+            }, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Error saving cache: {e}")
+
+# ================= OLLAMA SUMMARIZER ===================
 def summarize_with_ollama(prompt, model="gemma3:4b"):
     try:
         result = subprocess.run(
@@ -24,13 +59,7 @@ def summarize_with_ollama(prompt, model="gemma3:4b"):
     except Exception as e:
         return f"⚠️ Unexpected error: {str(e)}"
 
-# ========== CACHED SUMMARIZER ==========
-@st.cache_data(show_spinner=False)
-def get_cached_summary(query, title, court, prompt):
-    summary = summarize_with_ollama(prompt)
-    return {"title": title, "court": court, "summary": summary}
-
-# ========== INDIA KANOON ==========
+# ================= INDIA KANOON SEARCH ===================
 def search_indiakanoon(query, debug=False):
     try:
         url = f"https://indiankanoon.org/search/?formInput={query.replace(' ', '+')}"
@@ -61,39 +90,46 @@ def search_indiakanoon(query, debug=False):
             st.error(f"IndiaKanoon error: {e}")
         return []
 
-# ========== DUCKDUCKGO FALLBACK ==========
-def duckduckgo_fallback_links(query, debug=False):
+# ================= SERPAPI FALLBACK ===================
+def serpapi_fallback_links(query, debug=False):
     try:
-        search_query = f"site:indiankanoon.org {query}"
-        search_url = f"https://lite.duckduckgo.com/lite/?q={urllib.parse.quote_plus(search_query)}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(search_url, headers=headers, timeout=10)
-        soup = BeautifulSoup(res.text, "lxml")
+        SERPAPI_API_KEY = st.secrets.get("SERPAPI_API_KEY", "")
+        if not SERPAPI_API_KEY:
+            if debug:
+                st.error("SerpAPI key not configured.")
+            return []
+
+        search_url = (
+            f"https://serpapi.com/search.json"
+            f"?engine=google"
+            f"&q=site:indiankanoon.org+{urllib.parse.quote_plus(query)}"
+            f"&api_key={SERPAPI_API_KEY}"
+        )
+        res = requests.get(search_url, timeout=10)
 
         if debug:
-            st.markdown("### 🧭 DuckDuckGo Raw HTML (5000 chars)")
+            st.markdown("### 🧭 SerpAPI Raw JSON (5000 chars)")
             st.code(res.text[:5000])
 
+        data = res.json()
         links = []
-        for a in soup.select("a[href^='http']"):
-            href = a.get("href")
-            if "indiankanoon.org/doc" in href:
-                match = re.search(r"(https?://indiankanoon\.org/doc/\d+)", href)
-                if match:
-                    links.append(match.group(1))
+        for result in data.get("organic_results", []):
+            link = result.get("link", "")
+            if "indiankanoon.org/doc" in link:
+                links.append(link)
             if len(links) >= 1:
                 break
         return links
     except Exception as e:
         if debug:
-            st.error(f"DuckDuckGo fallback error: {e}")
+            st.error(f"SerpAPI fallback error: {e}")
         return []
 
-# ========== CASE STRUCTURE ==========
+# ================= FETCH CASE DATA ===================
 def fetch_structured_case_data(url):
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(url, headers=headers)
+        res = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(res.text, "lxml")
 
         court = soup.find("h2", class_="docsource_main")
@@ -113,7 +149,7 @@ def fetch_structured_case_data(url):
     except Exception as e:
         return "Court Not Found", "Title Not Found", {}
 
-# ========== PROMPT BUILDER ==========
+# ================= PROMPT GENERATOR ===================
 def generate_summary_prompt(court, title, structured_data):
     sections = [f"**Court**: {court}", f"**Title**: {title}"]
     for tag, contents in structured_data.items():
@@ -134,9 +170,9 @@ Focus only on core legal arguments, relevant constitutional provisions, and the 
 
 Case details:
 
-{full_text[:50000]}"""
+{full_text[:100000]}"""
 
-# ========== STREAMLIT UI ==========
+# ================= STREAMLIT UI ===================
 st.set_page_config(page_title="Judgment Summarizer", layout="centered")
 st.title("⚖️ Judgment Summarizer")
 
@@ -152,8 +188,8 @@ if st.button("Search & Summarize"):
 
         if not links:
             if debug:
-                st.warning("No results from India Kanoon. Trying DuckDuckGo fallback...")
-            links = duckduckgo_fallback_links(query, debug=debug)
+                st.warning("No results from India Kanoon. Trying SerpAPI fallback...")
+            links = serpapi_fallback_links(query, debug=debug)
 
         if not links:
             st.error("❌ No relevant cases found from any source.")
@@ -181,8 +217,12 @@ if st.button("Search & Summarize"):
                         st.markdown("### 📝 Prompt")
                         st.text_area("Prompt", prompt, height=300)
 
-                    summary_data = get_cached_summary(query, title, court, prompt)
-                    summary = summary_data["summary"]
+                    cached = load_cached_summary(query, title, court)
+                    if cached and "summary" in cached:
+                        summary = cached["summary"]
+                    else:
+                        summary = summarize_with_ollama(prompt)
+                        save_cached_summary(query, title, court, summary)
 
                     st.markdown(f"**Case Title**: {title}")
                     st.markdown(f"**Court**: {court}")
