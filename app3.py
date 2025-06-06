@@ -14,7 +14,7 @@ def summarize_with_ollama(prompt, model="gemma3:4b"):
             input=prompt.encode(),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=1800  # 30 min
+            timeout=1800
         )
         if result.returncode != 0:
             return f"⚠️ Ollama error: {result.stderr.decode()}"
@@ -32,8 +32,8 @@ def search_indiakanoon(query, debug=False):
         res = requests.get(search_url, headers=headers, timeout=10)
 
         if debug:
-            st.markdown("### 🔍 Debug: Raw IndiaKanoon HTML (first 500 chars)")
-            st.code(res.text[:500])
+            st.markdown("### 🔍 IndiaKanoon Raw HTML (1000 chars)")
+            st.code(res.text[:1000])
 
         if "No results found" in res.text or "/doc" not in res.text:
             return []
@@ -55,14 +55,18 @@ def search_indiakanoon(query, debug=False):
             st.error(f"India Kanoon error: {e}")
         return []
 
-# ========== DUCKDUCKGO FALLBACK ==========
+# ========== LITE DUCKDUCKGO FALLBACK ==========
 def duckduckgo_fallback_links(query, debug=False):
     try:
         search_query = f"site:indiankanoon.org {query}"
-        search_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote_plus(search_query)}"
+        search_url = f"https://lite.duckduckgo.com/lite/?q={urllib.parse.quote_plus(search_query)}"
         headers = {"User-Agent": "Mozilla/5.0"}
         res = requests.get(search_url, headers=headers, timeout=10)
         soup = BeautifulSoup(res.text, "lxml")
+
+        if debug:
+            st.markdown("### 🧭 DuckDuckGo Raw HTML (1000 chars)")
+            st.code(res.text[:1000])
 
         links = []
         for a in soup.select("a[href^='http']"):
@@ -73,10 +77,6 @@ def duckduckgo_fallback_links(query, debug=False):
                     links.append(match.group(1))
             if len(links) >= 1:
                 break
-
-        if debug:
-            st.markdown("### 🧭 Debug: DuckDuckGo fallback links")
-            st.write(links)
         return links
     except Exception as e:
         if debug:
