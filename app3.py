@@ -5,29 +5,6 @@ import subprocess
 import time
 import urllib.parse
 import re
-import os
-import hashlib
-import json
-
-# ========== CONFIG ==========
-CACHE_DIR = "/mnt/data/legal_cache"
-os.makedirs(CACHE_DIR, exist_ok=True)
-
-def get_cache_path(query):
-    hash_key = hashlib.sha256(query.encode()).hexdigest()
-    return os.path.join(CACHE_DIR, f"{hash_key}.json")
-
-def load_cached_summary(query):
-    path = get_cache_path(query)
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return None
-
-def save_cached_summary(query, title, court, summary):
-    path = get_cache_path(query)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump({"title": title, "court": court, "summary": summary}, f)
 
 # ========== OLLAMA SUMMARIZER ==========
 def summarize_with_ollama(prompt, model="gemma3:4b"):
@@ -46,6 +23,12 @@ def summarize_with_ollama(prompt, model="gemma3:4b"):
         return "⚠️ Summarization timed out."
     except Exception as e:
         return f"⚠️ Unexpected error: {str(e)}"
+
+# ========== CACHED SUMMARIZER ==========
+@st.cache_data(show_spinner=False)
+def get_cached_summary(query, title, court, prompt):
+    summary = summarize_with_ollama(prompt)
+    return {"title": title, "court": court, "summary": summary}
 
 # ========== INDIA KANOON ==========
 def search_indiakanoon(query, debug=False):
@@ -164,52 +147,43 @@ if st.button("Search & Summarize"):
     if not query:
         st.warning("Please enter a case name.")
     else:
-        cached = load_cached_summary(query)
-        if cached:
-            st.success("📦 Loaded from cache!")
-            st.markdown(f"**Case Title**: {cached['title']}")
-            st.markdown(f"**Court**: {cached['court']}")
-            st.text_area("Finding:", cached['summary'], height=500)
+        with st.spinner("Searching India Kanoon..."):
+            links = search_indiakanoon(query, debug=debug)
+
+        if not links:
+            if debug:
+                st.warning("No results from India Kanoon. Trying DuckDuckGo fallback...")
+            links = duckduckgo_fallback_links(query, debug=debug)
+
+        if not links:
+            st.error("❌ No relevant cases found from any source.")
         else:
-            with st.spinner("Searching India Kanoon..."):
-                links = search_indiakanoon(query, debug=debug)
+            for i, link in enumerate(links, 1):
+                st.markdown(f"### Casefile")
+                st.markdown(f"[🔗 View Full Case →]({link})", unsafe_allow_html=True)
 
-            if not links:
-                if debug:
-                    st.warning("No results from India Kanoon. Trying DuckDuckGo fallback...")
-                links = duckduckgo_fallback_links(query, debug=debug)
+                with st.spinner("Fetching and summarizing..."):
+                    court, title, data = fetch_structured_case_data(link)
 
-            if not links:
-                st.error("❌ No relevant cases found from any source.")
-            else:
-                for i, link in enumerate(links, 1):
-                    st.markdown(f"### Casefile")
-                    st.markdown(f"[🔗 View Full Case →]({link})", unsafe_allow_html=True)
+                    if debug:
+                        st.markdown("### 🧠 Debug: Metadata")
+                        st.write(f"**Court**: {court}")
+                        st.write(f"**Title**: {title}")
+                        st.json(data)
 
-                    with st.spinner("Fetching and summarizing..."):
-                        court, title, data = fetch_structured_case_data(link)
+                    if not any(data.values()):
+                        st.warning("❌ Structured data not found.")
+                        continue
 
-                        if debug:
-                            st.markdown("### 🧠 Debug: Metadata")
-                            st.write(f"**Court**: {court}")
-                            st.write(f"**Title**: {title}")
-                            st.json(data)
+                    prompt = generate_summary_prompt(court, title, data)
 
-                        if not any(data.values()):
-                            st.warning("❌ Structured data not found.")
-                            continue
+                    if debug:
+                        st.markdown("### 📝 Prompt")
+                        st.text_area("Prompt", prompt, height=300)
 
-                        prompt = generate_summary_prompt(court, title, data)
+                    summary_data = get_cached_summary(query, title, court, prompt)
+                    summary = summary_data["summary"]
 
-                        if debug:
-                            st.markdown("### 📝 Prompt")
-                            st.text_area("Prompt", prompt, height=300)
-
-                        summary = summarize_with_ollama(prompt)
-
-                        if not summary.startswith("⚠️"):
-                            save_cached_summary(query, title, court, summary)
-
-                        st.markdown(f"**Case Title**: {title}")
-                        st.markdown(f"**Court**: {court}")
-                        st.text_area("Finding:", summary, height=500, key=f"summary_{i}")
+                    st.markdown(f"**Case Title**: {title}")
+                    st.markdown(f"**Court**: {court}")
+                    st.text_area("Finding:", summary, height=500, key=f"summary_{i}")
