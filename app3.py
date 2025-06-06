@@ -55,11 +55,11 @@ def search_indiakanoon(query, debug=False):
             st.error(f"India Kanoon error: {e}")
         return []
 
-# ========== GOOGLE FALLBACK ==========
-def google_fallback_links(query, debug=False):
+# ========== DUCKDUCKGO FALLBACK ==========
+def duckduckgo_fallback_links(query, debug=False):
     try:
         search_query = f"site:indiankanoon.org {query}"
-        search_url = f"https://www.google.com/search?q={urllib.parse.quote_plus(search_query)}"
+        search_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote_plus(search_query)}"
         headers = {"User-Agent": "Mozilla/5.0"}
         res = requests.get(search_url, headers=headers, timeout=10)
         soup = BeautifulSoup(res.text, "lxml")
@@ -73,13 +73,14 @@ def google_fallback_links(query, debug=False):
                     links.append(match.group(1))
             if len(links) >= 1:
                 break
+
         if debug:
-            st.markdown("### 🧭 Debug: Google fallback links")
+            st.markdown("### 🧭 Debug: DuckDuckGo fallback links")
             st.write(links)
         return links
     except Exception as e:
         if debug:
-            st.error(f"Google fallback error: {e}")
+            st.error(f"DuckDuckGo fallback error: {e}")
         return []
 
 # ========== CASE SCRAPER ==========
@@ -148,8 +149,8 @@ if st.button("Search & Summarize"):
 
         if not links:
             if debug:
-                st.warning("India Kanoon returned no links. Trying Google fallback...")
-            links = google_fallback_links(query, debug=debug)
+                st.warning("India Kanoon returned no links. Trying DuckDuckGo fallback...")
+            links = duckduckgo_fallback_links(query, debug=debug)
 
         if not links:
             st.error("No relevant cases found from any source.")
