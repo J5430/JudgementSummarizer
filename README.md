@@ -15,4 +15,4 @@ This project is **non-commercial** and aims to benefit the legal community and s
 
 📫 For issues or queries: **jassingh.8895@outlook.com**
 
-☁️ **(Hosted with Streamlit)(https://judgementsummarizer.streamlit.app/)** | 📂 **[Open Source on GitHub](https://github.com/J5430/JudgementSummarizer)**
+☁️ **[Hosted with Streamlit](https://judgementsummarizer.streamlit.app/)** | 📂 **[Open Source on GitHub](https://github.com/J5430/JudgementSummarizer)**
