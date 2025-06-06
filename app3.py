@@ -2,228 +2,153 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 import subprocess
-import os
 import json
-import hashlib
-import urllib.parse
+import os
+from urllib.parse import urlparse
 
-# ================= LOCAL CACHE PATH (Streamlit Cloud friendly) ===================
-CACHE_DIR = "./cache"
+# === Config ===
+SERPAPI_API_KEY = st.secrets.get("SERPAPI_API_KEY") or os.getenv("SERPAPI_API_KEY")
+MODEL_NAME = "gemma3:4b"  # or your local model name
 
-def get_cache_path(query, title, court):
-    key = f"{query}|{title}|{court}"
-    filename = hashlib.sha256(key.encode()).hexdigest() + ".json"
-    return os.path.join(CACHE_DIR, filename)
+# Cache folder for Streamlit Cloud
+CACHE_DIR = os.path.join(os.getcwd(), ".cache")
+os.makedirs(CACHE_DIR, exist_ok=True)
 
-def load_cached_summary(query, title, court):
-    path = get_cache_path(query, title, court)
-    if os.path.exists(path):
+# === Helper functions ===
+
+@st.cache_data(show_spinner=False)
+def serpapi_search(query: str):
+    params = {
+        "engine": "google",
+        "q": f"site:indiankanoon.org {query}",
+        "api_key": SERPAPI_API_KEY,
+    }
+    url = "https://serpapi.com/search"
+    resp = requests.get(url, params=params)
+    resp.raise_for_status()
+    return resp.json()
+
+@st.cache_data(show_spinner=False)
+def fetch_case_html(url: str):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; Bot/1.0)"
+    }
+    resp = requests.get(url, headers=headers)
+    resp.raise_for_status()
+    return resp.text
+
+def extract_structured_data(html: str):
+    soup = BeautifulSoup(html, "html.parser")
+    # Look for JSON-LD script tags (application/ld+json)
+    jsonld_tags = soup.find_all("script", type="application/ld+json")
+    for tag in jsonld_tags:
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"Error loading cache: {e}")
-            return None
+            data = json.loads(tag.string)
+            # Look for legal case or judgment structured data
+            if isinstance(data, dict) and ("@type" in data and "Legal" in data["@type"]):
+                return data
+            # If multiple items, check list for Legal types
+            if isinstance(data, list):
+                for entry in data:
+                    if isinstance(entry, dict) and ("@type" in entry and "Legal" in entry["@type"]):
+                        return entry
+        except Exception:
+            continue
+    # fallback: check for embedded script with window.__INITIAL_STATE__ or similar
+    # or try to find structured JSON in scripts
+    # Return None if no structured data found
     return None
 
-def save_cached_summary(query, title, court, summary):
-    if not os.path.exists(CACHE_DIR):
-        os.makedirs(CACHE_DIR)
-    path = get_cache_path(query, title, court)
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({
-                "query": query,
-                "title": title,
-                "court": court,
-                "summary": summary
-            }, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"Error saving cache: {e}")
+def extract_judgment_text(html: str):
+    # fallback: extract main judgment text by looking for <pre> or main content div
+    soup = BeautifulSoup(html, "html.parser")
+    # IndiaKanoon often uses <pre id="idText"> or class "document"
+    pre = soup.find("pre", id="idText")
+    if pre and pre.text.strip():
+        return pre.text.strip()
+    div = soup.find("div", {"class": "document"})
+    if div and div.text.strip():
+        return div.text.strip()
+    # fallback entire body text (not ideal)
+    body = soup.find("body")
+    if body:
+        return body.get_text(separator="\n").strip()
+    return ""
 
-# ================= OLLAMA SUMMARIZER ===================
-def summarize_with_ollama(prompt, model="gemma3:4b"):
+def summarize_text(text: str, model=MODEL_NAME):
+    prompt = f"""Summarize the following Indian legal judgment in plain language focusing on facts, issues, reasoning, and conclusion:
+
+{text[:4000]}"""  # limit input length
+
     try:
         result = subprocess.run(
             ["ollama", "run", model],
             input=prompt.encode(),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=1800
+            timeout=20,
         )
-        if result.returncode != 0:
-            return f"⚠️ Ollama error: {result.stderr.decode()}"
-        return result.stdout.decode()
-    except subprocess.TimeoutExpired:
-        return "⚠️ Summarization timed out."
+        summary = result.stdout.decode().strip()
+        if not summary:
+            summary = "⚠️ Summarization failed or returned empty output."
+        return summary
     except Exception as e:
-        return f"⚠️ Unexpected error: {str(e)}"
+        return f"❌ Error during summarization: {str(e)}"
 
-# ================= INDIA KANOON SEARCH ===================
-def search_indiakanoon(query, debug=False):
-    try:
-        url = f"https://indiankanoon.org/search/?formInput={query.replace(' ', '+')}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(url, headers=headers, timeout=10)
+# === Streamlit app ===
 
-        if debug:
-            st.markdown("### 🔍 IndiaKanoon Raw HTML (1000 chars)")
-            st.code(res.text[:1000])
+st.set_page_config(page_title="⚖️ Judgment Summarizer", layout="centered")
 
-        if "No results found" in res.text or "/doc" not in res.text:
-            return []
-
-        soup = BeautifulSoup(res.text, "lxml")
-        links = []
-        for a in soup.select("a[href^='/doc']"):
-            href = a['href']
-            if href.startswith("/docfragment/"):
-                continue
-            full = f"https://indiankanoon.org{href}"
-            if full not in links:
-                links.append(full)
-            if len(links) >= 1:
-                break
-        return links
-    except Exception as e:
-        if debug:
-            st.error(f"IndiaKanoon error: {e}")
-        return []
-
-# ================= SERPAPI FALLBACK ===================
-def serpapi_fallback_links(query, debug=False):
-    try:
-        SERPAPI_API_KEY = st.secrets.get("SERPAPI_API_KEY", "")
-        if not SERPAPI_API_KEY:
-            if debug:
-                st.error("SerpAPI key not configured.")
-            return []
-
-        search_url = (
-            f"https://serpapi.com/search.json"
-            f"?engine=google"
-            f"&q=site:indiankanoon.org+{urllib.parse.quote_plus(query)}"
-            f"&api_key={SERPAPI_API_KEY}"
-        )
-        res = requests.get(search_url, timeout=10)
-
-        if debug:
-            st.markdown("### 🧭 SerpAPI Raw JSON (5000 chars)")
-            st.code(res.text[:5000])
-
-        data = res.json()
-        links = []
-        for result in data.get("organic_results", []):
-            link = result.get("link", "")
-            if "indiankanoon.org/doc" in link:
-                links.append(link)
-            if len(links) >= 1:
-                break
-        return links
-    except Exception as e:
-        if debug:
-            st.error(f"SerpAPI fallback error: {e}")
-        return []
-
-# ================= FETCH CASE DATA ===================
-def fetch_structured_case_data(url):
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(res.text, "lxml")
-
-        court = soup.find("h2", class_="docsource_main")
-        title = soup.find("h2", class_="doc_title")
-        court = court.get_text(strip=True) if court else "Court Not Found"
-        title = title.get_text(strip=True) if title else "Title Not Found"
-
-        tags = ["Facts", "Issue", "Section", "CDiscource", "Precedent"]
-        data = {tag: [] for tag in tags}
-        for tag in tags:
-            for p in soup.find_all("p", {"data-structure": tag}):
-                txt = p.get_text(strip=True)
-                if txt:
-                    data[tag].append(txt)
-
-        return court, title, data
-    except Exception as e:
-        return "Court Not Found", "Title Not Found", {}
-
-# ================= PROMPT GENERATOR ===================
-def generate_summary_prompt(court, title, structured_data):
-    sections = [f"**Court**: {court}", f"**Title**: {title}"]
-    for tag, contents in structured_data.items():
-        if contents:
-            sections.append(f"**{tag}**:\n" + "\n".join(contents))
-    full_text = "\n\n".join(sections)
-    return f"""You are a legal analyst. Provide a structured, concise, and formal 5000 word summary of the legal case below. Use simple language suitable for a law student or general audience.
-
-Do not include any follow-up questions or interactive phrases at the end.
-
-Organize the summary using these sections:
-1. Facts  
-2. Issues  
-3. Reasoning  
-4. Final Finding  
-
-Focus only on core legal arguments, relevant constitutional provisions, and the court’s conclusion. Avoid unnecessary repetition or commentary.
-
-Case details:
-
-{full_text[:100000]}"""
-
-# ================= STREAMLIT UI ===================
-st.set_page_config(page_title="Judgment Summarizer", layout="centered")
 st.title("⚖️ Judgment Summarizer")
+st.write("Enter a case name (Syntax: X vs Y 2007)")
 
-debug = st.checkbox("Enable Debug Mode")
-query = st.text_input("Enter a case (Syntax: X vs Y 2007)")
+case_name = st.text_input("Enter Case Name", value="Indian Medical Association vs V.P. Shantha & Ors")
 
-if st.button("Search & Summarize"):
-    if not query:
-        st.warning("Please enter a case name.")
+if st.button("Summarize"):
+    if not case_name.strip():
+        st.error("Please enter a valid case name.")
     else:
-        with st.spinner("Searching India Kanoon..."):
-            links = search_indiakanoon(query, debug=debug)
+        with st.spinner("Searching IndiaKanoon via SerpAPI..."):
+            try:
+                search_results = serpapi_search(case_name)
+            except Exception as e:
+                st.error(f"SerpAPI Search failed: {e}")
+                st.stop()
 
-        if not links:
-            if debug:
-                st.warning("No results from India Kanoon. Trying SerpAPI fallback...")
-            links = serpapi_fallback_links(query, debug=debug)
+            organic = search_results.get("organic_results", [])
+            if not organic:
+                st.warning("No results found on IndiaKanoon via SerpAPI.")
+                st.stop()
 
-        if not links:
-            st.error("❌ No relevant cases found from any source.")
-        else:
-            for i, link in enumerate(links, 1):
-                st.markdown(f"### Casefile")
-                st.markdown(f"[🔗 View Full Case →]({link})", unsafe_allow_html=True)
+            first_result = organic[0]
+            case_url = first_result.get("link") or first_result.get("url")
+            st.write(f"🔗 [Found case]({case_url})")
 
-                with st.spinner("Fetching and summarizing..."):
-                    court, title, data = fetch_structured_case_data(link)
+            with st.spinner("Fetching case page..."):
+                try:
+                    case_html = fetch_case_html(case_url)
+                except Exception as e:
+                    st.error(f"Failed to fetch case page: {e}")
+                    st.stop()
 
-                    if debug:
-                        st.markdown("### 🧠 Debug: Metadata")
-                        st.write(f"**Court**: {court}")
-                        st.write(f"**Title**: {title}")
-                        st.json(data)
+            # Try extracting structured data first
+            structured = extract_structured_data(case_html)
+            if structured:
+                st.subheader("📄 Structured Case Data (JSON-LD)")
+                st.json(structured)
+                # For summary, you can stringify key fields or full JSON as text
+                text_to_summarize = json.dumps(structured, indent=2)
+            else:
+                st.warning("No structured data found, extracting plain judgment text...")
+                text_to_summarize = extract_judgment_text(case_html)
+                if not text_to_summarize:
+                    st.error("No judgment text could be extracted.")
+                    st.stop()
 
-                    if not any(data.values()):
-                        st.warning("❌ Structured data not found.")
-                        continue
+            st.subheader("🔍 Raw Text (preview, first 1000 chars)")
+            st.text(text_to_summarize[:1000])
 
-                    prompt = generate_summary_prompt(court, title, data)
-
-                    if debug:
-                        st.markdown("### 📝 Prompt")
-                        st.text_area("Prompt", prompt, height=300)
-
-                    cached = load_cached_summary(query, title, court)
-                    if cached and "summary" in cached:
-                        summary = cached["summary"]
-                    else:
-                        summary = summarize_with_ollama(prompt)
-                        save_cached_summary(query, title, court, summary)
-
-                    st.markdown(f"**Case Title**: {title}")
-                    st.markdown(f"**Court**: {court}")
-                    st.text_area("Finding:", summary, height=500, key=f"summary_{i}")
+            with st.spinner("Generating summary..."):
+                summary = summarize_text(text_to_summarize)
+                st.subheader("📝 Summary")
+                st.write(summary)
