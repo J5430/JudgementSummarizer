@@ -1,94 +1,82 @@
+# app.py
+
 import streamlit as st
-import requests
-from bs4 import BeautifulSoup
-import json
-import os
+from ikapi import IKApi, FileStorage
+import subprocess
 
-SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")  # Set this in your environment or Streamlit secrets
+st.set_page_config(page_title="Judgment Summarizer", layout="wide")
+st.title("⚖️ Judgment Summarizer")
 
-def search_serpapi(query):
-    params = {
-        "engine": "google",
-        "q": f"site:indiankanoon.org {query}",
-        "api_key": SERPAPI_API_KEY,
-    }
-    response = requests.get("https://serpapi.com/search", params=params)
-    response.raise_for_status()
-    return response.json()
+# ==============================
+# 🔧 Summarizer (Ollama)
+# ==============================
+def summarize_with_ollama(text, model="gemma3:4b"):
+    prompt = f"Summarize the following legal judgment in plain English:\n\n{text[:4000]}"
+    try:
+        result = subprocess.run(
+            ["ollama", "run", model],
+            input=prompt.encode(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=60
+        )
+        return result.stdout.decode("utf-8")
+    except Exception as e:
+        return f"❌ Error during summarization: {str(e)}"
 
-def fetch_case_html(url):
-    headers = {
-        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/114.0.0.0 Safari/537.36")
-    }
-    resp = requests.get(url, headers=headers)
-    resp.raise_for_status()
-    return resp.text
+# ==============================
+# 📦 Init IK API
+# ==============================
+@st.cache_resource
+def get_ikapi(token: str):
+    class Args:
+        def __init__(self):
+            self.token = token
+            self.maxpages = 1
+            self.orig = False
+            self.fromdate = None
+            self.todate = None
+            self.sortby = None
+    return IKApi(Args(), FileStorage("ik_data"))
 
-def parse_structured_data(html):
-    # Example: search for a script tag containing JSON structured data
-    soup = BeautifulSoup(html, "html.parser")
-    scripts = soup.find_all("script", type="application/ld+json")
-    for script in scripts:
-        try:
-            data = json.loads(script.string)
-            if isinstance(data, dict) and "court" in data:
-                return data
-        except Exception:
-            continue
-    # fallback: return None if no structured data found
-    return None
+# ==============================
+# 🔍 Search / Fetch Section
+# ==============================
+token = st.secrets["ik_token"]
+ik = get_ikapi(token)
 
-def main():
-    st.title("⚖️ Judgment Summarizer")
+with st.expander("🔍 Search"):
+    query = st.text_input("Enter a case (Syntax: X vs Y 2007)")
+    if st.button("Search"):
+        if not query.strip():
+            st.warning("Please enter a valid search query.")
+        else:
+            results = ik.search(query)
+            if "results" in results:
+                for item in results["results"][:5]:  # show top 5
+                    st.markdown(f"**{item.get('title')}**\n\n- DocID: `{item.get('docid')}`\n- Snippet: {item.get('snippet')}\n---")
+            else:
+                st.error("No results found or error in search.")
 
-    case_input = st.text_input("Enter a case (Syntax: X vs Y 2007)")
-    if not case_input:
-        st.info("Please enter a case name to search.")
-        return
+# ==============================
+# 📄 Fetch by DocID
+# ==============================
+st.subheader("📄 Fetch and Summarize Judgment by DocID")
+docid = st.text_input("Enter Document ID from Indian Kanoon")
 
-    with st.spinner("Searching IndiaKanoon via SerpAPI..."):
-        try:
-            serp_results = search_serpapi(case_input)
-        except Exception as e:
-            st.error(f"SerpAPI search failed: {e}")
-            return
-
-    organic = serp_results.get("organic_results", [])
-    if not organic:
-        st.warning("No results found from SerpAPI.")
-        return
-
-    # Use the first result link from indiankanoon.org
-    case_url = None
-    for result in organic:
-        link = result.get("link")
-        if link and "indiankanoon.org" in link:
-            case_url = link
-            break
-
-    if not case_url:
-        st.warning("No valid IndiaKanoon case URL found in search results.")
-        return
-
-    st.markdown(f"**Found case URL:** [Link]({case_url})")
-
-    with st.spinner("Fetching case page..."):
-        try:
-            html = fetch_case_html(case_url)
-        except requests.HTTPError as e:
-            st.error(f"Failed to fetch case page: {e}")
-            return
-
-    structured_data = parse_structured_data(html)
-    if structured_data:
-        st.subheader("Structured Case Data")
-        st.json(structured_data)
+if st.button("Fetch & Summarize"):
+    if not docid.isdigit():
+        st.error("Doc ID must be a number.")
     else:
-        st.warning("No structured data found on the case page.")
-        # Optional: Show raw HTML snippet preview
-        st.text_area("Raw HTML snippet", html[:2000])
-
-if __name__ == "__main__":
-    main()
+        with st.spinner("Fetching document..."):
+            try:
+                doc = ik.fetch_doc(int(docid))
+                st.success("Fetched successfully.")
+                st.markdown(f"### 📝 Title: {doc.get('title', 'Untitled')}")
+                st.markdown(f"#### ⚖️ Court: {doc.get('court')} — {doc.get('date')}")
+                st.markdown("---")
+                st.markdown("### 🧠 Summary:")
+                summary = summarize_with_ollama(doc.get("judgmentText", ""))
+                st.text_area("Summary", summary, height=300)
+            except Exception as e:
+                st.error(f"Failed to fetch/summarize: {str(e)}")
