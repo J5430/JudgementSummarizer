@@ -1,154 +1,94 @@
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
-import subprocess
 import json
 import os
-from urllib.parse import urlparse
 
-# === Config ===
-SERPAPI_API_KEY = st.secrets.get("SERPAPI_API_KEY") or os.getenv("SERPAPI_API_KEY")
-MODEL_NAME = "gemma3:4b"  # or your local model name
+SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")  # Set this in your environment or Streamlit secrets
 
-# Cache folder for Streamlit Cloud
-CACHE_DIR = os.path.join(os.getcwd(), ".cache")
-os.makedirs(CACHE_DIR, exist_ok=True)
-
-# === Helper functions ===
-
-@st.cache_data(show_spinner=False)
-def serpapi_search(query: str):
+def search_serpapi(query):
     params = {
         "engine": "google",
         "q": f"site:indiankanoon.org {query}",
         "api_key": SERPAPI_API_KEY,
     }
-    url = "https://serpapi.com/search"
-    resp = requests.get(url, params=params)
-    resp.raise_for_status()
-    return resp.json()
+    response = requests.get("https://serpapi.com/search", params=params)
+    response.raise_for_status()
+    return response.json()
 
-@st.cache_data(show_spinner=False)
-def fetch_case_html(url: str):
+def fetch_case_html(url):
     headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; Bot/1.0)"
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/114.0.0.0 Safari/537.36")
     }
     resp = requests.get(url, headers=headers)
     resp.raise_for_status()
     return resp.text
 
-def extract_structured_data(html: str):
+def parse_structured_data(html):
+    # Example: search for a script tag containing JSON structured data
     soup = BeautifulSoup(html, "html.parser")
-    # Look for JSON-LD script tags (application/ld+json)
-    jsonld_tags = soup.find_all("script", type="application/ld+json")
-    for tag in jsonld_tags:
+    scripts = soup.find_all("script", type="application/ld+json")
+    for script in scripts:
         try:
-            data = json.loads(tag.string)
-            # Look for legal case or judgment structured data
-            if isinstance(data, dict) and ("@type" in data and "Legal" in data["@type"]):
+            data = json.loads(script.string)
+            if isinstance(data, dict) and "court" in data:
                 return data
-            # If multiple items, check list for Legal types
-            if isinstance(data, list):
-                for entry in data:
-                    if isinstance(entry, dict) and ("@type" in entry and "Legal" in entry["@type"]):
-                        return entry
         except Exception:
             continue
-    # fallback: check for embedded script with window.__INITIAL_STATE__ or similar
-    # or try to find structured JSON in scripts
-    # Return None if no structured data found
+    # fallback: return None if no structured data found
     return None
 
-def extract_judgment_text(html: str):
-    # fallback: extract main judgment text by looking for <pre> or main content div
-    soup = BeautifulSoup(html, "html.parser")
-    # IndiaKanoon often uses <pre id="idText"> or class "document"
-    pre = soup.find("pre", id="idText")
-    if pre and pre.text.strip():
-        return pre.text.strip()
-    div = soup.find("div", {"class": "document"})
-    if div and div.text.strip():
-        return div.text.strip()
-    # fallback entire body text (not ideal)
-    body = soup.find("body")
-    if body:
-        return body.get_text(separator="\n").strip()
-    return ""
+def main():
+    st.title("⚖️ Judgment Summarizer")
 
-def summarize_text(text: str, model=MODEL_NAME):
-    prompt = f"""Summarize the following Indian legal judgment in plain language focusing on facts, issues, reasoning, and conclusion:
+    case_input = st.text_input("Enter a case (Syntax: X vs Y 2007)")
+    if not case_input:
+        st.info("Please enter a case name to search.")
+        return
 
-{text[:4000]}"""  # limit input length
+    with st.spinner("Searching IndiaKanoon via SerpAPI..."):
+        try:
+            serp_results = search_serpapi(case_input)
+        except Exception as e:
+            st.error(f"SerpAPI search failed: {e}")
+            return
 
-    try:
-        result = subprocess.run(
-            ["ollama", "run", model],
-            input=prompt.encode(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=20,
-        )
-        summary = result.stdout.decode().strip()
-        if not summary:
-            summary = "⚠️ Summarization failed or returned empty output."
-        return summary
-    except Exception as e:
-        return f"❌ Error during summarization: {str(e)}"
+    organic = serp_results.get("organic_results", [])
+    if not organic:
+        st.warning("No results found from SerpAPI.")
+        return
 
-# === Streamlit app ===
+    # Use the first result link from indiankanoon.org
+    case_url = None
+    for result in organic:
+        link = result.get("link")
+        if link and "indiankanoon.org" in link:
+            case_url = link
+            break
 
-st.set_page_config(page_title="⚖️ Judgment Summarizer", layout="centered")
+    if not case_url:
+        st.warning("No valid IndiaKanoon case URL found in search results.")
+        return
 
-st.title("⚖️ Judgment Summarizer")
-st.write("Enter a case name (Syntax: X vs Y 2007)")
+    st.markdown(f"**Found case URL:** [Link]({case_url})")
 
-case_name = st.text_input("Enter Case Name", value="Indian Medical Association vs V.P. Shantha & Ors")
+    with st.spinner("Fetching case page..."):
+        try:
+            html = fetch_case_html(case_url)
+        except requests.HTTPError as e:
+            st.error(f"Failed to fetch case page: {e}")
+            return
 
-if st.button("Summarize"):
-    if not case_name.strip():
-        st.error("Please enter a valid case name.")
+    structured_data = parse_structured_data(html)
+    if structured_data:
+        st.subheader("Structured Case Data")
+        st.json(structured_data)
     else:
-        with st.spinner("Searching IndiaKanoon via SerpAPI..."):
-            try:
-                search_results = serpapi_search(case_name)
-            except Exception as e:
-                st.error(f"SerpAPI Search failed: {e}")
-                st.stop()
+        st.warning("No structured data found on the case page.")
+        # Optional: Show raw HTML snippet preview
+        st.text_area("Raw HTML snippet", html[:2000])
 
-            organic = search_results.get("organic_results", [])
-            if not organic:
-                st.warning("No results found on IndiaKanoon via SerpAPI.")
-                st.stop()
-
-            first_result = organic[0]
-            case_url = first_result.get("link") or first_result.get("url")
-            st.write(f"🔗 [Found case]({case_url})")
-
-            with st.spinner("Fetching case page..."):
-                try:
-                    case_html = fetch_case_html(case_url)
-                except Exception as e:
-                    st.error(f"Failed to fetch case page: {e}")
-                    st.stop()
-
-            # Try extracting structured data first
-            structured = extract_structured_data(case_html)
-            if structured:
-                st.subheader("📄 Structured Case Data (JSON-LD)")
-                st.json(structured)
-                # For summary, you can stringify key fields or full JSON as text
-                text_to_summarize = json.dumps(structured, indent=2)
-            else:
-                st.warning("No structured data found, extracting plain judgment text...")
-                text_to_summarize = extract_judgment_text(case_html)
-                if not text_to_summarize:
-                    st.error("No judgment text could be extracted.")
-                    st.stop()
-
-            st.subheader("🔍 Raw Text (preview, first 1000 chars)")
-            st.text(text_to_summarize[:1000])
-
-            with st.spinner("Generating summary..."):
-                summary = summarize_text(text_to_summarize)
-                st.subheader("📝 Summary")
-                st.write(summary)
+if __name__ == "__main__":
+    main()
