@@ -89,6 +89,8 @@ Case details:
 st.set_page_config(page_title="Judgment Summarizer", layout="centered")
 st.title("⚖️ Judgment Summarizer")
 
+debug = st.checkbox("Enable Debug Mode")
+
 query = st.text_input("Enter a case (Syntax: X vs Y 2007)")
 
 if st.button("Search & Summarize"):
@@ -98,11 +100,13 @@ if st.button("Search & Summarize"):
         with st.spinner("Searching India Kanoon..."):
             links = search_indiakanoon(query)
 
+        if debug:
+            st.markdown("### 🔍 Debug: Search Results")
+            st.write(links)
+
         if not links:
             st.error("No relevant cases found.")
         else:
-            st.spinner()
-
             for i, link in enumerate(links, 1):
                 st.markdown(f"### Casefile")
                 st.markdown(f"[View Full Case →]({link})", unsafe_allow_html=True)
@@ -110,14 +114,29 @@ if st.button("Search & Summarize"):
                 with st.spinner("Fetching and summarizing..."):
                     court, title, data = fetch_structured_case_data(link)
 
+                    if debug:
+                        st.markdown("### 🧠 Debug: Fetched Metadata")
+                        st.write(f"**Court**: {court}")
+                        st.write(f"**Title**: {title}")
+                        st.write("**Structured Data**:")
+                        st.json(data)
+
                     if not any(data.values()):
                         st.warning("❌ Structured data not found.")
                         continue
 
                     prompt = generate_summary_prompt(court, title, data)
+
+                    if debug:
+                        st.markdown("### 📄 Debug: Generated Prompt")
+                        st.text_area("Prompt Preview", prompt, height=300, key=f"prompt_{i}")
+
                     summary = summarize_with_ollama(prompt)
+
+                    if debug and summary.startswith("⚠️"):
+                        st.markdown("### ⚠️ Debug: LLM Response Error")
+                        st.error(summary)
 
                     st.markdown(f"**Case Title**: {title}")
                     st.markdown(f"**Court**: {court}")
                     st.text_area("Finding:", summary, height=500, key=f"summary_{i}")
-                    
