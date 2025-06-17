@@ -1,6 +1,6 @@
 ## Disclaimer
 
-This project is built using **Streamlit** and integrates **Gemma 3 4B** to assist users in understanding legal judgments and documents. All legal content is fetched via the official API provided by **IKanoon Software Development Pvt Ltd**.
+This project is built using **Streamlit** and integrates **Gemma 3 4B** to assist users in understanding legal judgments and documents. All legal content is fetched via **IKanoon Software Development Pvt Ltd**'s Indian Kanoon.
 
 ⚠️ **Disclaimer:**  
 - The AI-generated summaries may be incomplete or inaccurate.  
@@ -15,4 +15,4 @@ This project is **non-commercial** and aims to benefit the legal community and s
 
 📫 For issues or queries: **jassingh.8895@outlook.com**
 
-☁️ **[Hosted with Streamlit](https://judgementsummarizer.streamlit.app/)** | 📂 **[Open Source on GitHub](https://github.com/J5430/JudgementSummarizer)**
+📂 **[Open Source on GitHub](https://github.com/J5430/JudgementSummarizer)**
